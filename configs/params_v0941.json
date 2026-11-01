@@ -1,0 +1,33 @@
+{
+  "version": "0.9.41",
+  "lambda_shrink": 0.81,
+  "rho": -0.135,
+  "prior_00": 1.17,
+  "prior_11": 1.15,
+  "high_score_cap": 0.9,
+  "model_weight_base": 0.54,
+  "model_weight_min": 0.38,
+  "model_weight_max": 0.62,
+  "kelly_fraction": 0.45,
+  "rec_conf_min": 0.56,
+  "low_conf_skip": 0.47,
+  "draw_protect": 1.08,
+  "home_boost": {
+    "PL": 1.02,
+    "PD": 1.03,
+    "SA": 1.01,
+    "BL1": 0.97,
+    "FL1": 1.0,
+    "Eredivisie": 1.01,
+    "SerieA": 1.01,
+    "J1": 1.0,
+    "KLeague": 0.99,
+    "LaLiga": 1.03
+  },
+  "base_home_xg": 1.45,
+  "base_away_xg": 1.15,
+  "max_goals": 10,
+  "schedule_cache_ttl_seconds": 300,
+  "odds_ttl_seconds": 900,
+  "http_timeout_seconds": 8
+}

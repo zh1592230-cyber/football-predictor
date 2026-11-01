@@ -218,3 +218,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local data and generated predictions; keep curated samples/results trackable.
+/data/cache/*
+!/data/cache/.gitkeep
+/data/daily/*
+!/data/daily/.gitkeep
+/data/reports/*
+!/data/reports/.gitkeep
+.env.*
+!.env.example
