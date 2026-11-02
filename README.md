@@ -11,7 +11,7 @@
 - 结算预测与最终比分，计算 1X2 Brier 分数和 log loss；有足够的带标签样本时，可按时间切分扫描概率融合权重。
 - 不支持滚球条件预测。标记为 `live` 的比赛会跳过，避免将赛前模型误用于比赛进行中。
 
-提供方应返回赛程 JSON 数组，或 `{"matches": [...]}`。每场至少包含 `match_id`、`home_team`、`away_team`、`status`；`status` 应为 `scheduled`、`live`、`finished`、`postponed` 或 `cancelled`。可选字段包括带时区的 ISO-8601 `kickoff`、`league`、`home_xg`、`away_xg`。赔率 JSON 对象应包含大于 1 的 `home`、`draw`、`away` 十进制赔率，以及带时区的 ISO-8601 `updated_at` 时间戳。需要认证时，可设置 `FOOTBALL_API_TOKEN` 环境变量；适配器会将其作为 HTTP Authorization 请求头发送。请勿提交密钥。
+提供方应返回赛程 JSON 数组，或 `{"matches": [...]}`。每场至少包含稳定 `match_id`、`home_team`、`away_team`、`status` 和带时区的 ISO-8601 `kickoff`；`status` 应为 `scheduled`、`live`、`finished`、`postponed` 或 `cancelled`，常见 `not_started`、`in_play`、`inplay`、`ft` 别名会归一化。空赛程、重复 ID、无效时间或只给一方 xG 都会报错，不解释成“确认无赛事”。可选联赛字段为 `league`。xG 的规范输入是嵌套对象 `prematch_xg: {"home": 1.4, "away": 0.9, "type": "prematch", "source": "licensed-provider-id", "generated_at": "2026-11-03T08:00:00Z"}`；扁平 `home_xg`/`away_xg` 仅作尚未核验来源的兼容输入，不能触发推荐。provider xG 仅在 `source` 位于配置 `xg_allowed_sources`、生成时间早于预测时间和开赛时间、且未超过 `xg_ttl_seconds` 时被视为可验证赛前数据。赛后实际 xG (`xg_type: postmatch_actual_xg`) 不可进入预测输入。赔率 JSON 对象应包含大于 1 的 `home`、`draw`、`away` 十进制赔率，以及带时区的 ISO-8601 `updated_at` 时间戳。需要认证时，可设置 `FOOTBALL_API_TOKEN` 环境变量；适配器会将其作为 HTTP Authorization 请求头发送。请勿提交密钥。
 
 Dixon–Coles 使用此处的 rho 符号约定：`tau00=1-lambda_home*lambda_away*rho`、`tau01=1+lambda_home*rho`、`tau10=1+lambda_away*rho`、`tau11=1-rho`，仅校正 0-0、0-1、1-0、1-1。非法负校正会报错。得分矩阵仅计算 0 至 `max_goals`，并在该截断矩阵内归一化；`truncated_score_mass` 报告独立 Poisson 截断前的遗漏尾部质量。
 
@@ -37,7 +37,7 @@ python scripts/run_today.py --test-schedule --no-cache
 
 `--no-cache` 跳过赛程缓存读取并请求配置的数据源（成功后仍更新缓存）。`--test-schedule` 只检查赛程并打印来源、更新时间、新鲜度和场次数；获取错误返回退出码 2，过期缓存、demo fixture 或零场返回非零退出码。Demo fixture 会明确报告 `source=demo_fixture` / `freshness=demo`，不是实时源连通性证明。未配置 `FOOTBALL_SCHEDULE_URL` 且无可用缓存时，今日预测和赛程检查均明确失败，不会伪称成功。没有 `FOOTBALL_ODDS_URL` 时预测会标记赔率未配置并仅输出模型概率，不含赔率融合。
 
-常用配置位于 `configs/params_v0941.json`。其中 0.9.41 参数和联赛 `home_boost` 是用户提供的初始参考值，未声称经过本项目回测验证；当前模型仅使用明确说明的 Poisson/DC 参数、基线 xG、最大进球范围和融合权重。`lambda_shrink` 是 match xG 向配置基线的收缩权重，联赛 `home_boost` 只调整该主场基线，不代表模型已校准。预测结果会在 `xg_source` 标记输入 xG 或未校准基线来源，不把用户提供的演示 xG 当成实测数据。`allow_baseline_recommend` 默认关闭；设为 true 只是显式启用基线阈值筛选，不表示该阈值已验证或预测构成投注建议。其他经验后处理参数目前保留以便兼容，但不会影响输出。用户提供的演示赛程/比分样例仅用于契约测试，未写入真实赛程数据，也未用于训练或参数扫描。
+常用配置位于 `configs/params_v0941.json`。其中 0.9.41 参数和联赛 `home_boost` 是用户提供的初始参考值，未声称经过本项目回测验证；当前模型仅使用明确说明的 Poisson/DC 参数、基线 xG、最大进球范围和融合权重。`lambda_shrink` 是 match xG 向配置基线的收缩权重，联赛 `home_boost` 只调整该主场基线，不代表模型已校准。预测结果会在 `xg_source` 和 `expected_goals.metadata` 标记来源、时间和新鲜度。推荐只对配置允许且新鲜、开赛前生成的 provider xG 开启，并仍需达到置信度阈值；基线/未验证 xG 不产生推荐，`allow_baseline_recommend` 不会绕过这一数据来源门槛。用户提供的演示赛程/比分样例仅用于契约测试，未写入真实赛程数据，也未用于训练或参数扫描。历史结果只用于结算；生成历史赛前预测时，特征必须在该场 kickoff 前可用，不能把赛后比分或实际 xG 输入预测模型。
 
 ## 回测与权重扫描
 

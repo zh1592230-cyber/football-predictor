@@ -27,6 +27,8 @@
   "base_home_xg": 1.45,
   "base_away_xg": 1.15,
   "allow_baseline_recommend": false,
+  "xg_ttl_seconds": 86400,
+  "xg_allowed_sources": [],
   "max_goals": 10,
   "schedule_cache_ttl_seconds": 300,
   "odds_ttl_seconds": 900,

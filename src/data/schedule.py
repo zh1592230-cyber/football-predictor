@@ -16,13 +16,27 @@ from src.config import BASE_DIR, load_params, validate_params
 from src.utils import load_json, parse_timestamp, save_json, utc_now, validate_date
 
 _STATUSES = {"scheduled", "live", "finished", "postponed", "cancelled"}
+_STATUS_ALIASES = {
+    "not_started": "scheduled",
+    "not started": "scheduled",
+    "in_progress": "live",
+    "in-progress": "live",
+    "inplay": "live",
+    "in_play": "live",
+    "in-play": "live",
+    "ft": "finished",
+    "full_time": "finished",
+    "full-time": "finished",
+}
 
 
-def _validate_matches(value: Any) -> list[dict[str, Any]]:
+def _validate_matches(value: Any, require_kickoff: bool = False) -> list[dict[str, Any]]:
     if isinstance(value, dict):
         value = value.get("matches")
     if not isinstance(value, list):
         raise ValueError("Schedule response must be a JSON array or contain a matches array.")
+    if not value:
+        raise ValueError("Schedule source returned zero matches; verify the date and provider response.")
     matches: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for index, item in enumerate(value):
@@ -33,17 +47,47 @@ def _validate_matches(value: Any) -> list[dict[str, Any]]:
             if not isinstance(match.get(field), str) or not match[field].strip():
                 raise ValueError(f"Schedule match at index {index} requires {field}.")
             match[field] = match[field].strip()
-        if match["status"].lower() not in _STATUSES:
+        raw_status = match["status"].casefold()
+        match["status"] = _STATUS_ALIASES.get(raw_status, raw_status)
+        if match["status"] not in _STATUSES:
             raise ValueError(f"Unsupported match status: {match['status']}")
-        match["status"] = match["status"].lower()
         if match["match_id"] in seen_ids:
             raise ValueError(f"Duplicate match_id in schedule: {match['match_id']}")
         seen_ids.add(match["match_id"])
+        if require_kickoff and "kickoff" not in match:
+            raise ValueError(f"Schedule match at index {index} requires kickoff.")
         if "kickoff" in match:
             parse_timestamp(match["kickoff"], "kickoff")
+        if "prematch_xg" in match:
+            if "home_xg" in match or "away_xg" in match:
+                raise ValueError(
+                    f"Schedule match at index {index} cannot mix prematch_xg with flat xG fields."
+                )
+            prematch_xg = match["prematch_xg"]
+            if not isinstance(prematch_xg, dict):
+                raise ValueError(f"Schedule match at index {index} prematch_xg must be an object.")
+            prematch_xg = dict(prematch_xg)
+            match["prematch_xg"] = prematch_xg
+            has_home_xg = "home" in prematch_xg
+            has_away_xg = "away" in prematch_xg
+            if has_home_xg != has_away_xg:
+                raise ValueError(
+                    f"Schedule match at index {index} prematch_xg requires both home and away."
+                )
+            if has_home_xg:
+                prematch_xg["home"] = _finite_nonnegative(
+                    prematch_xg["home"], "prematch_xg.home"
+                )
+                prematch_xg["away"] = _finite_nonnegative(
+                    prematch_xg["away"], "prematch_xg.away"
+                )
+        has_home_xg = "home_xg" in match
+        has_away_xg = "away_xg" in match
+        if has_home_xg != has_away_xg:
+            raise ValueError(f"Schedule match at index {index} must provide both home_xg and away_xg.")
         for field in ("home_xg", "away_xg"):
             if field in match:
-                _finite_nonnegative(match[field], field)
+                match[field] = _finite_nonnegative(match[field], field)
         matches.append(match)
     return matches
 
@@ -117,7 +161,7 @@ def fetch_jingcai_schedule(
         if not isinstance(loaded, dict) or loaded.get("date") != target_date:
             raise ValueError(f"Invalid schedule cache: {cache_path}")
         cached_at = parse_timestamp(loaded.get("fetched_at"), "schedule cache fetched_at")
-        cached_matches = _validate_matches(loaded.get("matches"))
+        cached_matches = _validate_matches(loaded.get("matches"), require_kickoff=True)
         age_seconds = (now - cached_at).total_seconds()
         if age_seconds < -60:
             raise ValueError(f"Schedule cache timestamp is in the future: {cache_path}")
@@ -145,7 +189,7 @@ def fetch_jingcai_schedule(
             _request_url(provider_url, "date", target_date),
             float(config["http_timeout_seconds"]),
         )
-        matches = _validate_matches(response)
+        matches = _validate_matches(response, require_kickoff=True)
     except (RuntimeError, ValueError) as error:
         if cache is not None:
             return _snapshot(
@@ -153,6 +197,6 @@ def fetch_jingcai_schedule(
                 cache["age_seconds"], f"Provider refresh failed: {error}",
             )
         raise
-    fetched_at = now.isoformat()
+    fetched_at = utc_now().isoformat()
     save_json({"date": target_date, "fetched_at": fetched_at, "matches": matches}, cache_path)
     return _snapshot(matches, "provider", fetched_at, "fresh", 0.0)

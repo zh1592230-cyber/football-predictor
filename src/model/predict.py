@@ -15,6 +15,19 @@ from src.model.fusion import de_vig_1x2, fuse_probabilities
 from src.model.poisson import outcome_probabilities, score_matrix
 from src.utils import get_data_dir, save_json, validate_date
 
+_STATUS_ALIASES = {
+    "not_started": "scheduled",
+    "not started": "scheduled",
+    "in_progress": "live",
+    "in-progress": "live",
+    "inplay": "live",
+    "in_play": "live",
+    "in-play": "live",
+    "ft": "finished",
+    "full_time": "finished",
+    "full-time": "finished",
+}
+
 
 def predict_match(
     match: dict[str, Any],
@@ -27,7 +40,8 @@ def predict_match(
     for field in ("match_id", "home_team", "away_team", "status"):
         if not isinstance(match.get(field), str) or not match[field].strip():
             raise ValueError(f"match requires a non-empty {field}.")
-    status = match["status"].strip().lower()
+    raw_status = match["status"].strip().casefold()
+    status = _STATUS_ALIASES.get(raw_status, raw_status)
     if status == "live":
         return {"match_id": match["match_id"], "status": "skipped_live",
                 "reason": "No score-, minute-, or red-card-conditioned live model is implemented."}
@@ -36,8 +50,10 @@ def predict_match(
     if status != "scheduled":
         return {"match_id": match["match_id"], "status": "skipped",
                 "reason": f"Pre-match prediction is not applicable to status {status!r}."}
+    if any(match.get(field) is not None for field in ("score", "home_goals", "away_goals")):
+        raise ValueError("Final score fields cannot be used as pre-match prediction inputs.")
 
-    lambda_home, lambda_away, xg_source = get_expected_goals(match, config)
+    lambda_home, lambda_away, xg_source, xg_metadata = get_expected_goals(match, config)
     score = score_matrix(lambda_home, lambda_away, config["rho"], config["max_goals"])
     matrix = score["matrix"]
     model_probs = outcome_probabilities(matrix)
@@ -83,10 +99,7 @@ def predict_match(
     recommendation = (
         max(probabilities, key=probabilities.get)
         if confidence >= float(config["rec_conf_min"])
-        and (
-            xg_source.startswith("match_xg_shrunk_to_unvalidated_baseline")
-            or config["allow_baseline_recommend"]
-        )
+        and xg_metadata["recommendation_eligible"]
         else None
     )
     result = {
@@ -97,7 +110,12 @@ def predict_match(
         "league": match.get("league"),
         "kickoff": match.get("kickoff"),
         "xg_source": xg_source,
-        "expected_goals": {"home": lambda_home, "away": lambda_away, "source": xg_source},
+        "expected_goals": {
+            "home": lambda_home,
+            "away": lambda_away,
+            "source": xg_source,
+            "metadata": xg_metadata,
+        },
         "model_probabilities": model_probs,
         "market_probabilities": market_probs,
         "probabilities": probabilities,
@@ -109,11 +127,10 @@ def predict_match(
         "truncated_score_mass": score["truncated_mass"],
         "recommendation": recommendation,
         "recommendation_policy": (
-            "confidence_threshold_unvalidated"
+            "confidence_threshold_unvalidated_provider_xg"
             if recommendation is not None
-            else "disabled_for_unvalidated_baseline"
-            if xg_source.startswith("unvalidated_configured_baseline")
-            and not config["allow_baseline_recommend"]
+            else "disabled_for_unverified_xg"
+            if not xg_metadata["recommendation_eligible"]
             else "below_confidence_threshold"
         ),
         "top_outcome_probability": confidence,

@@ -82,16 +82,20 @@ class ProbabilityTests(unittest.TestCase):
 
     def test_xg_shrinkage_is_towards_explicit_baseline(self) -> None:
         params = load_params()
-        home, away, source = get_expected_goals({"home_xg": 2.0, "away_xg": 1.0}, params)
+        home, away, source, metadata = get_expected_goals(
+            {"home_xg": 2.0, "away_xg": 1.0}, params
+        )
         self.assertAlmostEqual(home, 0.81 * 2.0 + 0.19 * params["base_home_xg"])
         self.assertAlmostEqual(away, 0.81 * 1.0 + 0.19 * params["base_away_xg"])
-        self.assertIn("baseline", source)
+        self.assertIn("unverified", source)
+        self.assertEqual(metadata["source"], "provided_prematch_xg_unverified")
 
     def test_xg_falls_back_when_both_values_are_missing(self) -> None:
         params = load_params()
-        home, away, source = get_expected_goals({}, params)
+        home, away, source, metadata = get_expected_goals({}, params)
         self.assertEqual((home, away), (params["base_home_xg"], params["base_away_xg"]))
         self.assertEqual(source, "unvalidated_configured_baseline")
+        self.assertFalse(metadata["recommendation_eligible"])
 
     def test_xg_requires_both_home_and_away_values(self) -> None:
         with self.assertRaisesRegex(ValueError, "both home_xg and away_xg"):
@@ -116,14 +120,14 @@ class ProbabilityTests(unittest.TestCase):
 
     def test_league_home_boost_adjusts_prior_not_supplied_xg(self) -> None:
         params = load_params()
-        boosted_home, boosted_away, source = get_expected_goals(
+        boosted_home, boosted_away, source, _ = get_expected_goals(
             {"league": "PL"}, params
         )
         self.assertAlmostEqual(boosted_home, params["base_home_xg"] * 1.02)
         self.assertEqual(boosted_away, params["base_away_xg"])
         self.assertIn("home_boost", source)
 
-        shrunk_home, shrunk_away, _ = get_expected_goals(
+        shrunk_home, shrunk_away, _, _ = get_expected_goals(
             {"league": "PL", "home_xg": 2.0, "away_xg": 1.0}, params
         )
         self.assertAlmostEqual(
@@ -135,14 +139,14 @@ class ProbabilityTests(unittest.TestCase):
             0.81 * 1.0 + 0.19 * params["base_away_xg"],
         )
         no_shrink_params = {**params, "lambda_shrink": 1.0}
-        supplied_home, _, _ = get_expected_goals(
+        supplied_home, _, _, _ = get_expected_goals(
             {"league": "PL", "home_xg": 2.0, "away_xg": 1.0},
             no_shrink_params,
         )
         self.assertEqual(supplied_home, 2.0)
 
     def test_missing_xg_config_fields_use_documented_defaults(self) -> None:
-        home, away, source = get_expected_goals({}, {"lambda_shrink": 0.5})
+        home, away, source, _ = get_expected_goals({}, {"lambda_shrink": 0.5})
         params = load_params()
         self.assertEqual((home, away), (params["base_home_xg"], params["base_away_xg"]))
         self.assertEqual(source, "unvalidated_configured_baseline")
@@ -166,7 +170,152 @@ class ProbabilityTests(unittest.TestCase):
             "unvalidated_configured_baseline",
         )
         self.assertIsNone(prediction["recommendation"])
-        self.assertEqual(prediction["recommendation_policy"], "disabled_for_unvalidated_baseline")
+        self.assertEqual(prediction["recommendation_policy"], "disabled_for_unverified_xg")
+
+    def test_prematch_provider_xg_requires_allowlist_and_valid_time_provenance(self) -> None:
+        prediction_time = datetime(2026, 11, 1, 10, tzinfo=timezone.utc)
+        match = {
+            "league": "PL",
+            "kickoff": "2026-11-01T14:00:00+00:00",
+            "xg_type": "prematch",
+            "prematch_xg": {
+                "home": 4.0,
+                "away": 0.2,
+                "source": "licensed-xg",
+                "generated_at": "2026-11-01T09:00:00+00:00",
+            },
+        }
+        params = {**load_params(), "xg_allowed_sources": ["licensed-xg"]}
+        home, away, source, metadata = get_expected_goals(match, params, now=prediction_time)
+        self.assertIn("prematch_xg_provider_shrunk", source)
+        self.assertAlmostEqual(home, 0.81 * 4.0 + 0.19 * 1.45 * 1.02)
+        self.assertAlmostEqual(away, 0.81 * 0.2 + 0.19 * 1.15)
+        self.assertEqual(metadata["source"], "licensed-xg")
+        self.assertTrue(metadata["recommendation_eligible"])
+
+        with self.assertRaisesRegex(ValueError, "not in xg_allowed_sources"):
+            get_expected_goals(match, load_params(), now=prediction_time)
+        stale = {
+            **match,
+            "prematch_xg": {
+                **match["prematch_xg"],
+                "generated_at": "2026-10-30T09:00:00+00:00",
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "stale"):
+            get_expected_goals(stale, params, now=prediction_time)
+        after_kickoff = {
+            **match,
+            "prematch_xg": {
+                **match["prematch_xg"],
+                "generated_at": "2026-11-01T14:00:00+00:00",
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "earlier than kickoff"):
+            get_expected_goals(after_kickoff, params, now=prediction_time)
+        after_prediction = {
+            **match,
+            "prematch_xg": {
+                **match["prematch_xg"],
+                "generated_at": "2026-11-01T11:00:00+00:00",
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "future"):
+            get_expected_goals(after_prediction, params, now=prediction_time)
+        with self.assertRaisesRegex(ValueError, "at or after kickoff"):
+            get_expected_goals(
+                match,
+                params,
+                now=datetime(2026, 11, 1, 15, tzinfo=timezone.utc),
+            )
+
+    def test_postmatch_actual_xg_and_unknown_xg_type_are_rejected(self) -> None:
+        actual = {
+            "xg_type": "postmatch_actual_xg",
+            "home_xg": 1.4,
+            "away_xg": 0.8,
+        }
+        with self.assertRaisesRegex(ValueError, "cannot be used"):
+            get_expected_goals(actual)
+        with self.assertRaisesRegex(ValueError, "xg_type"):
+            get_expected_goals({"xg_type": "unknown", "home_xg": 1.4, "away_xg": 0.8})
+        with self.assertRaisesRegex(ValueError, "score fields"):
+            predict_match({
+                "match_id": "m-leak",
+                "home_team": "A",
+                "away_team": "B",
+                "status": "scheduled",
+                "home_goals": 2,
+                "away_goals": 0,
+            })
+
+    def test_prediction_recommendation_requires_fresh_allowlisted_provider_xg(self) -> None:
+        now = datetime.now(timezone.utc)
+        match = {
+            "match_id": "m-provider",
+            "home_team": "A",
+            "away_team": "B",
+            "status": "scheduled",
+            "kickoff": (now + timedelta(hours=4)).isoformat(),
+            "xg_type": "prematch",
+            "prematch_xg": {
+                "home": 4.0,
+                "away": 0.2,
+                "source": "licensed-xg",
+                "generated_at": (now - timedelta(minutes=5)).isoformat(),
+            },
+        }
+        params = {**load_params(), "xg_allowed_sources": ["licensed-xg"]}
+        prediction = predict_match(match, params=params)
+        self.assertEqual(prediction["xg_source"], "prematch_xg_provider_shrunk")
+        self.assertEqual(prediction["recommendation"], "home")
+        self.assertTrue(prediction["expected_goals"]["metadata"]["recommendation_eligible"])
+        unverified = predict_match({
+            "match_id": "m-unverified",
+            "home_team": "A",
+            "away_team": "B",
+            "status": "scheduled",
+            "home_xg": 4.0,
+            "away_xg": 0.2,
+        })
+        self.assertIsNone(unverified["recommendation"])
+        self.assertEqual(
+            unverified["recommendation_policy"],
+            "disabled_for_unverified_xg",
+        )
+
+    def test_provider_schedule_contract_rejects_empty_missing_kickoff_and_unpaired_xg(self) -> None:
+        with self.assertRaisesRegex(ValueError, "zero matches"):
+            schedule._validate_matches([])
+        valid = {
+            "match_id": "m1", "home_team": "A", "away_team": "B",
+            "status": "scheduled", "kickoff": "2026-11-03T12:00:00Z",
+        }
+        with self.assertRaisesRegex(ValueError, "requires kickoff"):
+            schedule._validate_matches([{key: value for key, value in valid.items() if key != "kickoff"}],
+                                       require_kickoff=True)
+        with self.assertRaisesRegex(ValueError, "both home_xg and away_xg"):
+            schedule._validate_matches([{**valid, "home_xg": 1.2}])
+        with self.assertRaisesRegex(ValueError, "both home and away"):
+            schedule._validate_matches([{**valid, "prematch_xg": {"home": 1.2}}])
+        with self.assertRaisesRegex(ValueError, "include a timezone"):
+            schedule._validate_matches([{**valid, "kickoff": "2026-11-03T12:00:00"}])
+
+    def test_status_aliases_normalize_and_live_path_skips_model_and_odds(self) -> None:
+        normalized = schedule._validate_matches([{
+            "match_id": "live-1", "home_team": "A", "away_team": "B",
+            "status": "IN_PLAY",
+        }])
+        self.assertEqual(normalized[0]["status"], "live")
+        match = {**normalized[0]}
+        with patch("src.model.predict.score_matrix") as score_matrix_mock, \
+                patch("src.model.predict.fuse_probabilities") as fusion_mock, \
+                patch("src.model.predict.de_vig_1x2") as odds_mock:
+            result = predict_match(match)
+        self.assertEqual(result["status"], "skipped_live")
+        score_matrix_mock.assert_not_called()
+        fusion_mock.assert_not_called()
+        odds_mock.assert_not_called()
 
     def test_expired_odds_are_not_used_for_market_fusion(self) -> None:
         match = {
@@ -279,7 +428,7 @@ class AdapterTests(unittest.TestCase):
                     patch.dict(os.environ, {"FOOTBALL_SCHEDULE_URL": "https://provider.test/schedule"}, clear=True), \
                     patch.object(schedule, "_http_json", return_value={"matches": [{
                         "match_id": "m1", "home_team": "A", "away_team": "B",
-                        "status": "scheduled",
+                        "status": "scheduled", "kickoff": "2026-11-01T12:00:00Z",
                     }]}) as request:
                 first = schedule.fetch_jingcai_schedule("2026-11-01", load_params())
                 second = schedule.fetch_jingcai_schedule("2026-11-01", load_params())
@@ -297,14 +446,14 @@ class AdapterTests(unittest.TestCase):
                 "fetched_at": datetime.now(timezone.utc).isoformat(),
                 "matches": [{
                     "match_id": "cached", "home_team": "A", "away_team": "B",
-                    "status": "scheduled",
+                    "status": "scheduled", "kickoff": "2026-11-01T12:00:00Z",
                 }],
             }), encoding="utf-8")
             with patch.object(schedule, "BASE_DIR", root), \
                     patch.dict(os.environ, {"FOOTBALL_SCHEDULE_URL": "https://provider.test/schedule"}, clear=True), \
                     patch.object(schedule, "_http_json", return_value={"matches": [{
                         "match_id": "fresh", "home_team": "C", "away_team": "D",
-                        "status": "scheduled",
+                        "status": "scheduled", "kickoff": "2026-11-01T13:00:00Z",
                     }]}) as request:
                 snapshot = schedule.fetch_jingcai_schedule(
                     "2026-11-01", load_params(), use_cache=False
@@ -345,6 +494,38 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertEqual(report["status"], "demo")
         self.assertEqual(report["source"], "demo_fixture")
+
+    def test_run_daily_saves_live_match_as_skipped_without_model_or_odds(self) -> None:
+        snapshot = {
+            "matches": [{
+                "match_id": "live-1",
+                "home_team": "A",
+                "away_team": "B",
+                "status": "live",
+                "kickoff": "2026-11-02T10:00:00Z",
+            }],
+            "source": "provider",
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "freshness": "fresh",
+            "age_seconds": 0,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            with patch("src.model.predict.fetch_jingcai_schedule", return_value=snapshot), \
+                    patch("src.model.predict.get_data_dir",
+                          side_effect=lambda *parts: output_dir.joinpath(*parts)), \
+                    patch("src.model.predict.fetch_nowgoal_odds") as odds_fetch, \
+                    patch("src.model.predict.score_matrix") as score_mock, \
+                    patch.dict(os.environ, {"FOOTBALL_ODDS_URL": "https://provider.test/odds"}, clear=True):
+                result = run_daily("2026-11-02")
+            saved = json.loads(
+                (output_dir / "daily" / "predictions_2026-11-02.json").read_text(encoding="utf-8")
+            )
+        self.assertEqual(result["predictions"][0]["status"], "skipped_live")
+        self.assertEqual(result["displayed"][0]["status"], "skipped_live")
+        self.assertEqual(saved[0]["status"], "skipped_live")
+        odds_fetch.assert_not_called()
+        score_mock.assert_not_called()
 
 
 class BacktestTests(unittest.TestCase):
@@ -428,7 +609,7 @@ class BacktestTests(unittest.TestCase):
                 (output_dir / "daily" / "predictions_2026-11-01.json").read_text(encoding="utf-8")
             )
         self.assertEqual(len(result["predictions"]), 2)
-        self.assertEqual(len(result["displayed"]), 1)
+        self.assertEqual(len(result["displayed"]), 0)
         self.assertEqual(len(saved), 2)
         self.assertEqual(saved[0]["date"], "2026-11-01")
 

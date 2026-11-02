@@ -35,6 +35,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "base_home_xg": 1.45,
     "base_away_xg": 1.15,
     "allow_baseline_recommend": False,
+    "xg_ttl_seconds": 86400,
+    "xg_allowed_sources": [],
     "max_goals": 10,
     "schedule_cache_ttl_seconds": 300,
     "odds_ttl_seconds": 900,
@@ -71,6 +73,14 @@ def validate_params(params: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("version must be a non-empty string.")
     if not isinstance(merged["allow_baseline_recommend"], bool):
         raise ValueError("allow_baseline_recommend must be a boolean.")
+    if not isinstance(merged["xg_allowed_sources"], list) or any(
+        not isinstance(source, str) or not source.strip()
+        for source in merged["xg_allowed_sources"]
+    ):
+        raise ValueError("xg_allowed_sources must be a list of non-empty source names.")
+    merged["xg_allowed_sources"] = list(dict.fromkeys(
+        source.strip() for source in merged["xg_allowed_sources"]
+    ))
     for key, (minimum, maximum) in _BOUNDED.items():
         value = _finite_number(merged[key], key)
         if not minimum <= value <= maximum:
@@ -91,7 +101,10 @@ def validate_params(params: Mapping[str, Any]) -> dict[str, Any]:
         merged[key] = _finite_number(merged[key], key)
         if merged[key] <= 0:
             raise ValueError(f"{key} must be greater than zero.")
-    for key in ("schedule_cache_ttl_seconds", "odds_ttl_seconds", "http_timeout_seconds"):
+    for key in (
+        "schedule_cache_ttl_seconds", "odds_ttl_seconds",
+        "xg_ttl_seconds", "http_timeout_seconds",
+    ):
         value = _finite_number(merged[key], key)
         if value <= 0:
             raise ValueError(f"{key} must be greater than zero.")
