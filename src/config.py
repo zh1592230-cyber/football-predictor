@@ -34,6 +34,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     },
     "base_home_xg": 1.45,
     "base_away_xg": 1.15,
+    "allow_baseline_recommend": False,
     "max_goals": 10,
     "schedule_cache_ttl_seconds": 300,
     "odds_ttl_seconds": 900,
@@ -68,6 +69,8 @@ def validate_params(params: Mapping[str, Any]) -> dict[str, Any]:
             merged[key] = value
     if not isinstance(merged["version"], str) or not merged["version"].strip():
         raise ValueError("version must be a non-empty string.")
+    if not isinstance(merged["allow_baseline_recommend"], bool):
+        raise ValueError("allow_baseline_recommend must be a boolean.")
     for key, (minimum, maximum) in _BOUNDED.items():
         value = _finite_number(merged[key], key)
         if not minimum <= value <= maximum:
@@ -78,6 +81,9 @@ def validate_params(params: Mapping[str, Any]) -> dict[str, Any]:
         if key == "rho":
             if not -1.0 <= value <= 1.0:
                 raise ValueError("rho must be between -1 and 1.")
+        elif key in {"base_home_xg", "base_away_xg"}:
+            if value < 0:
+                raise ValueError(f"{key} must be non-negative.")
         elif value <= 0:
             raise ValueError(f"{key} must be greater than zero.")
         merged[key] = value

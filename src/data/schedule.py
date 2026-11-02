@@ -12,7 +12,7 @@ from urllib.error import URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
-from src.config import BASE_DIR, load_params
+from src.config import BASE_DIR, load_params, validate_params
 from src.utils import load_json, parse_timestamp, save_json, utc_now, validate_date
 
 _STATUSES = {"scheduled", "live", "finished", "postponed", "cancelled"}
@@ -98,9 +98,10 @@ def _snapshot(matches: list[dict[str, Any]], source: str, fetched_at: str, fresh
 def fetch_jingcai_schedule(
     date: str | None = None,
     params: dict[str, Any] | None = None,
+    use_cache: bool = True,
 ) -> dict[str, Any]:
     target_date = validate_date(date)
-    config = params or load_params()
+    config = load_params() if params is None else validate_params(params)
     cache_path = BASE_DIR / "data" / "cache" / f"schedule_{target_date}.json"
     now = utc_now()
     demo_mode = os.environ.get("FOOTBALL_PREDICTOR_DEMO") == "1"
@@ -111,7 +112,7 @@ def fetch_jingcai_schedule(
         return _snapshot(matches, "demo_fixture", now.isoformat(), "demo", 0.0)
 
     cache: dict[str, Any] | None = None
-    if cache_path.exists():
+    if use_cache and cache_path.exists():
         loaded = load_json(cache_path)
         if not isinstance(loaded, dict) or loaded.get("date") != target_date:
             raise ValueError(f"Invalid schedule cache: {cache_path}")

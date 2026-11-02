@@ -7,7 +7,7 @@ from datetime import date, datetime
 from typing import Any
 
 from src.backtest.settle import score_probabilities
-from src.config import load_params
+from src.config import load_params, validate_params
 
 _OUTCOMES = ("home", "draw", "away")
 
@@ -92,7 +92,7 @@ def scan_model_weight(
             "Insufficient labeled history: require at least 10 training and 5 validation matches "
             "after the chronological split."
         )
-    config = params or load_params()
+    config = load_params() if params is None else validate_params(params)
     low, high = float(config["model_weight_min"]), float(config["model_weight_max"])
     steps = 24
     candidates = [low + (high - low) * index / steps for index in range(steps + 1)]

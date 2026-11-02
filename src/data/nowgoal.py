@@ -7,7 +7,7 @@ import math
 import os
 from typing import Any
 
-from src.config import BASE_DIR, load_params
+from src.config import BASE_DIR, load_params, validate_params
 from src.data.schedule import _http_json, _request_url
 from src.utils import load_json, parse_timestamp, save_json, utc_now
 
@@ -65,7 +65,7 @@ def fetch_nowgoal_odds(match: dict[str, Any], params: dict[str, Any] | None = No
     if not isinstance(match_id, str) or not match_id.strip():
         raise ValueError("match requires a non-empty match_id.")
     match_id = match_id.strip()
-    config = params or load_params()
+    config = load_params() if params is None else validate_params(params)
     cache_key = hashlib.sha256(match_id.encode("utf-8")).hexdigest()
     cache_path = BASE_DIR / "data" / "cache" / f"odds_{cache_key}.json"
     now = utc_now()

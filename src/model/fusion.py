@@ -6,7 +6,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Mapping
 
-from src.config import load_params
+from src.config import load_params, validate_params
 from src.utils import parse_timestamp
 
 OUTCOMES = ("home", "draw", "away")
@@ -51,7 +51,7 @@ def fuse_probabilities(
     params: dict | None = None,
     now: datetime | None = None,
 ) -> dict[str, object]:
-    config = params or load_params()
+    config = load_params() if params is None else validate_params(params)
     model = _probabilities(model_probabilities, "model_probabilities")
     if market_probabilities is None:
         return {

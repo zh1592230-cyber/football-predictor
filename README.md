@@ -29,11 +29,15 @@ pip install -r requirements.txt
 python scripts/run_today.py
 python scripts/run_today.py --recommend
 python scripts/run_today.py --date 2026-11-01 --leagues PL,PD
+python scripts/run_today.py --test-schedule
+python scripts/run_today.py --test-schedule --no-cache
 ```
 
 若 URL 含 `{date}`，请求时会替换为 `YYYY-MM-DD`；否则适配器会添加 `date` 查询参数。赔率 URL 可含 `{match_id}`，或由适配器添加 `match_id` 查询参数。两种 URL 都可用 `FOOTBALL_PREDICTOR_DEMO=1` 启用本地 `data/samples/schedule_YYYY-MM-DD.json` 样例模式；该模式不请求供应商，且没有内置样例数据。样例结果会标记为 `demo`，不得用于实时决策。
 
-常用配置位于 `configs/params_v0941.json`。其中 0.9.41 参数和联赛 `home_boost` 是用户提供的初始参考值，未声称经过本项目回测验证；当前模型仅使用明确说明的 Poisson/DC 参数、基线 xG、最大进球范围和融合权重。`lambda_shrink` 是 match xG 向配置基线的收缩权重。经验后处理参数目前保留以便兼容，但不会影响输出。推荐筛选只对有明确 match xG 输入且赛程非 demo/非过期的比赛启用；`--recommend` 不代表投注建议。
+`--no-cache` 跳过赛程缓存读取并请求配置的数据源（成功后仍更新缓存）。`--test-schedule` 只检查赛程并打印来源、更新时间、新鲜度和场次数；获取错误返回退出码 2，过期缓存、demo fixture 或零场返回非零退出码。Demo fixture 会明确报告 `source=demo_fixture` / `freshness=demo`，不是实时源连通性证明。未配置 `FOOTBALL_SCHEDULE_URL` 且无可用缓存时，今日预测和赛程检查均明确失败，不会伪称成功。没有 `FOOTBALL_ODDS_URL` 时预测会标记赔率未配置并仅输出模型概率，不含赔率融合。
+
+常用配置位于 `configs/params_v0941.json`。其中 0.9.41 参数和联赛 `home_boost` 是用户提供的初始参考值，未声称经过本项目回测验证；当前模型仅使用明确说明的 Poisson/DC 参数、基线 xG、最大进球范围和融合权重。`lambda_shrink` 是 match xG 向配置基线的收缩权重，联赛 `home_boost` 只调整该主场基线，不代表模型已校准。预测结果会在 `xg_source` 标记输入 xG 或未校准基线来源，不把用户提供的演示 xG 当成实测数据。`allow_baseline_recommend` 默认关闭；设为 true 只是显式启用基线阈值筛选，不表示该阈值已验证或预测构成投注建议。其他经验后处理参数目前保留以便兼容，但不会影响输出。用户提供的演示赛程/比分样例仅用于契约测试，未写入真实赛程数据，也未用于训练或参数扫描。
 
 ## 回测与权重扫描
 
