@@ -45,8 +45,11 @@ python scripts/run_today.py --test-schedule --no-cache
 
 ```powershell
 python scripts/run_backtest.py --predictions data/daily/predictions_2026-11-01.json --results data/samples/results.json
+python scripts/run_backtest_report.py --predictions data/daily/predictions_2026-11-01.json --results data/samples/results.json
 python scripts/scan_params.py --input data/samples/labeled_predictions.json
 ```
+
+`run_backtest_report.py` writes a new timestamped folder under `data/reports/` with JSON and Markdown outputs; it does not overwrite input predictions/results and never updates parameters. It requires a one-to-one `match_id` match and each prediction must include timezone-aware `kickoff` and `generated_at` with generation strictly before kickoff; score fields in a prediction are rejected as target leakage. Brier/log loss and calibration are descriptive. Calibration bins are one-vs-rest and separated by outcome. Model-vs-market deltas use only matches with both forecasts. Small samples are prominently warned and must not be interpreted as reliable performance.
 
 扫描文件中的每条历史记录必须包含 `match_id`、`date`、`model_probabilities`、`market_probabilities` 和 `actual_outcome`（`home`、`draw` 或 `away`）；可以是该记录数组，也可以是结算报告的 `matches` 数组。扫描按日期排序，使用前 70% 选择融合权重、后 30% 验证；训练或验证样本不足时明确报错，不修改参数文件。得分适用于所提供的带标签样本，不等同于前瞻性能保证。
 

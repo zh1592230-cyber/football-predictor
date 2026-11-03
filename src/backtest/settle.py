@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from src.utils import get_data_dir, save_json, validate_date
+from src.utils import get_data_dir, parse_timestamp, save_json, validate_date
 
 _OUTCOMES = ("home", "draw", "away")
 
@@ -56,6 +56,19 @@ def settle_predictions(
             raise ValueError("Each prediction requires a non-empty match_id.")
         if match_id in forecasts:
             raise ValueError(f"Duplicate prediction match_id: {match_id}")
+        if not prediction.get("kickoff"):
+            raise ValueError(f"Prediction {match_id} requires a timezone-aware kickoff.")
+        if not prediction.get("generated_at"):
+            raise ValueError(f"Prediction {match_id} requires generated_at for leakage checks.")
+        kickoff = parse_timestamp(prediction["kickoff"], f"{match_id}.kickoff")
+        generated_at = parse_timestamp(prediction["generated_at"], f"{match_id}.generated_at")
+        if generated_at >= kickoff:
+            raise ValueError(
+                f"Prediction {match_id} was generated at or after kickoff; "
+                "post-kickoff predictions cannot be backtested as pre-match forecasts."
+            )
+        if any(prediction.get(field) is not None for field in ("score", "home_goals", "away_goals")):
+            raise ValueError(f"Prediction {match_id} contains final score fields (target leakage).")
         forecasts[match_id] = prediction
     actuals: dict[str, dict[str, Any]] = {}
     for result in results:
@@ -66,6 +79,8 @@ def settle_predictions(
             raise ValueError("Each result requires a non-empty match_id.")
         if match_id in actuals:
             raise ValueError(f"Duplicate result match_id: {match_id}")
+        if result.get("status") not in (None, "finished"):
+            raise ValueError(f"Result {match_id} must have status='finished' when status is provided.")
         actuals[match_id] = result
     missing = forecasts.keys() - actuals.keys()
     extra = actuals.keys() - forecasts.keys()
@@ -81,10 +96,15 @@ def settle_predictions(
         scores = score_probabilities(prediction.get("probabilities"), actual)
         settled.append({
             "match_id": match_id,
-            "date": prediction.get("kickoff") or prediction.get("date"),
+            "date": prediction["kickoff"][:10],
+            "kickoff": prediction["kickoff"],
+            "generated_at": prediction["generated_at"],
+            "league": prediction.get("league"),
+            "home_team": prediction.get("home_team"),
+            "away_team": prediction.get("away_team"),
             "actual_outcome": actual,
             "probabilities": prediction["probabilities"],
-            "model_probabilities": prediction.get("model_probabilities"),
+            "model_probabilities": prediction.get("model_probabilities", prediction["probabilities"]),
             "market_probabilities": prediction.get("market_probabilities"),
             "brier": scores["brier"],
             "log_loss": scores["log_loss"],

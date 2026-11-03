@@ -5,14 +5,17 @@ import os
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
 from scripts import run_today
+from scripts import run_backtest_report
 from src.backtest.scanner import scan_model_weight
+from src.backtest.metrics import calculate_metrics
+from src.backtest.report import write_backtest_report
 from src.backtest.settle import settle_predictions
 from src.config import load_params, validate_params
 from src.data import schedule
@@ -352,6 +355,16 @@ class ProbabilityTests(unittest.TestCase):
                 "m1",
             )
 
+    def test_prematch_prediction_skips_past_kickoff(self) -> None:
+        result = predict_match({
+            "match_id": "past-1",
+            "home_team": "A",
+            "away_team": "B",
+            "status": "scheduled",
+            "kickoff": "2026-11-02T10:00:00Z",
+        })
+        self.assertEqual(result["status"], "skipped_past_kickoff")
+
 
 class AdapterTests(unittest.TestCase):
     def test_user_sample_schedule_is_only_a_demo_contract_fixture(self) -> None:
@@ -527,11 +540,37 @@ class AdapterTests(unittest.TestCase):
         odds_fetch.assert_not_called()
         score_mock.assert_not_called()
 
+    def test_run_daily_does_not_fetch_odds_after_kickoff(self) -> None:
+        snapshot = {
+            "matches": [{
+                "match_id": "past-1",
+                "home_team": "A",
+                "away_team": "B",
+                "status": "scheduled",
+                "kickoff": "2026-11-02T10:00:00Z",
+            }],
+            "source": "provider",
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "freshness": "fresh",
+            "age_seconds": 0,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("src.model.predict.fetch_jingcai_schedule", return_value=snapshot), \
+                    patch("src.model.predict.get_data_dir",
+                          side_effect=lambda *parts: Path(directory).joinpath(*parts)), \
+                    patch("src.model.predict.fetch_nowgoal_odds") as odds_fetch, \
+                    patch.dict(os.environ, {"FOOTBALL_ODDS_URL": "https://provider.test/odds"}, clear=True):
+                result = run_daily("2026-11-03")
+        self.assertEqual(result["predictions"][0]["status"], "skipped_past_kickoff")
+        odds_fetch.assert_not_called()
+
 
 class BacktestTests(unittest.TestCase):
     def test_settlement_scores_match_and_rejects_id_mismatch(self) -> None:
         prediction = {
             "match_id": "m1", "status": "predicted",
+            "kickoff": "2026-11-03T18:00:00Z",
+            "generated_at": "2026-11-03T17:00:00Z",
             "probabilities": {"home": 0.7, "draw": 0.2, "away": 0.1},
         }
         report = settle_predictions([prediction], [
@@ -547,8 +586,12 @@ class BacktestTests(unittest.TestCase):
             {
                 "match_id": match_id,
                 "status": "predicted",
-                "date": "2026-11-01",
+                "kickoff": "2026-11-01T18:00:00+08:00",
+                "generated_at": "2026-11-01T12:00:00+08:00",
                 "probabilities": probabilities,
+                "model_probabilities": probabilities,
+                "market_probabilities": None,
+                "league": "DEMO",
             }
             for match_id, probabilities in (
                 ("demo_001", {"home": 0.5, "draw": 0.3, "away": 0.2}),
@@ -586,6 +629,123 @@ class BacktestTests(unittest.TestCase):
         self.assertFalse(result["applied_to_config"])
         with self.assertRaisesRegex(ValueError, "distinct dates"):
             scan_model_weight(records[:4])
+
+    def test_settlement_rejects_duplicate_ids_and_post_kickoff_prediction(self) -> None:
+        prediction = {
+            "match_id": "m1", "status": "predicted",
+            "kickoff": "2026-11-03T18:00:00Z",
+            "generated_at": "2026-11-03T18:00:00Z",
+            "probabilities": {"home": 0.4, "draw": 0.3, "away": 0.3},
+        }
+        result = [{"match_id": "m1", "home_goals": 1, "away_goals": 0}]
+        with self.assertRaisesRegex(ValueError, "at or after kickoff"):
+            settle_predictions([prediction], result)
+        with self.assertRaisesRegex(ValueError, "Duplicate prediction"):
+            settle_predictions(
+                [{**prediction, "generated_at": "2026-11-03T17:00:00Z"}] * 2,
+                result,
+            )
+        with self.assertRaisesRegex(ValueError, "Duplicate result"):
+            settle_predictions(
+                [{**prediction, "generated_at": "2026-11-03T17:00:00Z"}],
+                result * 2,
+            )
+
+    def test_settlement_rejects_bool_score_and_prediction_target_leakage(self) -> None:
+        prediction = {
+            "match_id": "m1", "status": "predicted",
+            "kickoff": "2026-11-03T18:00:00Z",
+            "generated_at": "2026-11-03T17:00:00Z",
+            "probabilities": {"home": 0.4, "draw": 0.3, "away": 0.3},
+        }
+        with self.assertRaisesRegex(ValueError, "home_goals"):
+            settle_predictions([prediction], [
+                {"match_id": "m1", "home_goals": True, "away_goals": 0}
+            ])
+        with self.assertRaisesRegex(ValueError, "target leakage"):
+            settle_predictions([{**prediction, "home_goals": 1}], [
+                {"match_id": "m1", "home_goals": 1, "away_goals": 0}
+            ])
+
+    def test_metrics_use_same_market_intersection_and_separate_calibration_outcomes(self) -> None:
+        matches = [
+            {
+                "actual_outcome": "home",
+                "model_probabilities": {"home": 0.8, "draw": 0.1, "away": 0.1},
+                "probabilities": {"home": 0.8, "draw": 0.1, "away": 0.1},
+                "market_probabilities": {"home": 0.3, "draw": 0.4, "away": 0.3},
+                "league": "A",
+            },
+            {
+                "actual_outcome": "away",
+                "model_probabilities": {"home": 0.2, "draw": 0.2, "away": 0.6},
+                "probabilities": {"home": 0.2, "draw": 0.2, "away": 0.6},
+                "market_probabilities": None,
+                "league": "B",
+            },
+            {
+                "actual_outcome": "draw",
+                "model_probabilities": {"home": 0.2, "draw": 0.5, "away": 0.3},
+                "probabilities": {"home": 0.2, "draw": 0.5, "away": 0.3},
+                "market_probabilities": {"home": 0.2, "draw": 0.5, "away": 0.3},
+                "league": "A",
+            },
+        ]
+        metrics = calculate_metrics(matches, n_bins=2)
+        self.assertEqual(metrics["model"]["count"], 3)
+        self.assertEqual(metrics["market_baseline"]["count"], 2)
+        self.assertEqual(metrics["model_vs_market_on_same_matches"]["count"], 2)
+        self.assertEqual(set(metrics["calibration"]["outcomes"]), {"home", "draw", "away"})
+        self.assertEqual(metrics["league_breakdown"]["A"]["count"], 2)
+        self.assertTrue(metrics["warnings"])
+        malformed_market = [{
+            **matches[0],
+            "market_probabilities": {"home": 0.6, "draw": 0.4},
+        }]
+        with self.assertRaisesRegex(ValueError, "market_probabilities.*probabilities.away"):
+            calculate_metrics(malformed_market)
+
+    def test_report_writes_timestamped_json_and_markdown_without_overwriting_inputs(self) -> None:
+        prediction = {
+            "match_id": "report-m1", "status": "predicted",
+            "kickoff": "2026-11-03T18:00:00Z",
+            "generated_at": "2026-11-03T17:00:00Z",
+            "league": "DEMO",
+            "probabilities": {"home": 0.7, "draw": 0.2, "away": 0.1},
+            "model_probabilities": {"home": 0.7, "draw": 0.2, "away": 0.1},
+            "market_probabilities": None,
+        }
+        results = [{"match_id": "report-m1", "home_goals": 2, "away_goals": 0}]
+        with tempfile.TemporaryDirectory() as directory:
+            report, report_dir = write_backtest_report(
+                [prediction], results, "2026-11-03", directory
+            )
+            json_report = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
+            markdown = (report_dir / "report.md").read_text(encoding="utf-8")
+            entries = list(Path(directory).iterdir())
+        self.assertEqual(report["metrics"]["sample_count"], 1)
+        self.assertFalse(report["auto_param_update"])
+        self.assertFalse(report["optimization_performed"])
+        self.assertEqual(json_report["matches"][0]["match_id"], "report-m1")
+        self.assertIn("descriptive", markdown.lower())
+        self.assertEqual(entries, [report_dir])
+        self.assertEqual(prediction["match_id"], "report-m1")
+
+    def test_report_cli_rejects_non_array_json_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            predictions_path = Path(directory) / "predictions.json"
+            results_path = Path(directory) / "results.json"
+            predictions_path.write_text("{}", encoding="utf-8")
+            results_path.write_text("[]", encoding="utf-8")
+            stderr = StringIO()
+            with patch.object(sys, "argv", [
+                "run_backtest_report.py",
+                "--predictions", str(predictions_path),
+                "--results", str(results_path),
+            ]), redirect_stderr(stderr):
+                exit_code = run_backtest_report.main()
+        self.assertEqual(exit_code, 2)
+        self.assertIn("Predictions input must be a JSON array", stderr.getvalue())
 
     def test_daily_run_saves_all_predictions_but_filters_display(self) -> None:
         snapshot = {

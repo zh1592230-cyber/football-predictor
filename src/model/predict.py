@@ -13,7 +13,7 @@ from src.data.schedule import fetch_jingcai_schedule
 from src.data.xg import get_expected_goals
 from src.model.fusion import de_vig_1x2, fuse_probabilities
 from src.model.poisson import outcome_probabilities, score_matrix
-from src.utils import get_data_dir, save_json, validate_date
+from src.utils import get_data_dir, parse_timestamp, save_json, utc_now, validate_date
 
 _STATUS_ALIASES = {
     "not_started": "scheduled",
@@ -52,8 +52,19 @@ def predict_match(
                 "reason": f"Pre-match prediction is not applicable to status {status!r}."}
     if any(match.get(field) is not None for field in ("score", "home_goals", "away_goals")):
         raise ValueError("Final score fields cannot be used as pre-match prediction inputs.")
+    generated_at = utc_now()
+    if match.get("kickoff") is not None:
+        kickoff = parse_timestamp(match["kickoff"], "kickoff")
+        if kickoff <= generated_at:
+            return {
+                "match_id": match["match_id"],
+                "status": "skipped_past_kickoff",
+                "reason": "Pre-match predictions are not generated at or after kickoff.",
+            }
 
-    lambda_home, lambda_away, xg_source, xg_metadata = get_expected_goals(match, config)
+    lambda_home, lambda_away, xg_source, xg_metadata = get_expected_goals(
+        match, config, now=generated_at
+    )
     score = score_matrix(lambda_home, lambda_away, config["rho"], config["max_goals"])
     matrix = score["matrix"]
     model_probs = outcome_probabilities(matrix)
@@ -107,6 +118,7 @@ def predict_match(
         "home_team": match["home_team"],
         "away_team": match["away_team"],
         "status": "predicted",
+        "generated_at": generated_at.isoformat(),
         "league": match.get("league"),
         "kickoff": match.get("kickoff"),
         "xg_source": xg_source,
@@ -168,6 +180,15 @@ def run_daily(
     predictions: list[dict[str, Any]] = []
     odds_configured = bool(os.environ.get("FOOTBALL_ODDS_URL"))
     for match in matches:
+        if match.get("status", "").casefold() == "scheduled" and match.get("kickoff"):
+            if parse_timestamp(match["kickoff"], "kickoff") <= utc_now():
+                prediction = predict_match(match, None, config)
+                prediction["date"] = target_date
+                prediction["schedule_source"] = snapshot["source"]
+                prediction["schedule_freshness"] = snapshot["freshness"]
+                prediction["schedule_age_seconds"] = snapshot["age_seconds"]
+                predictions.append(prediction)
+                continue
         odds: dict[str, Any] | None = None
         odds_error: str | None = None
         if odds_configured and match.get("status", "").lower() == "scheduled":
