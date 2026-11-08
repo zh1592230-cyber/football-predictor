@@ -1,0 +1,112 @@
+# 每日竞彩预测 — 北京时间 08:00（UTC 00:00）
+# Secrets（仓库 Settings → Secrets and variables → Actions）:
+#   FOOTBALL_SCHEDULE_URL  必填：赛程 JSON 接口（可含 {date}）
+#   FOOTBALL_ODDS_URL      可选：赔率 JSON 接口（可含 {match_id}）
+#   FOOTBALL_API_TOKEN     可选：HTTP Authorization
+name: daily-jingcai
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "预测日期 YYYY-MM-DD（默认北京时区今天）"
+        required: false
+        default: ""
+      recommend_only:
+        description: "仅输出达到置信阈值的推荐场"
+        type: boolean
+        default: false
+      demo:
+        description: "演示模式（FOOTBALL_PREDICTOR_DEMO=1，需有 data/samples）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Resolve Beijing date
+        id: day
+        run: |
+          if [ -n "${{ inputs.date }}" ]; then
+            DAY="${{ inputs.date }}"
+          else
+            DAY=$(TZ=Asia/Shanghai date +%F)
+          fi
+          echo "day=$DAY" >> "$GITHUB_OUTPUT"
+          echo "Beijing day: $DAY"
+
+      - name: Run daily prediction
+        env:
+          FOOTBALL_SCHEDULE_URL: ${{ secrets.FOOTBALL_SCHEDULE_URL }}
+          FOOTBALL_ODDS_URL: ${{ secrets.FOOTBALL_ODDS_URL }}
+          FOOTBALL_API_TOKEN: ${{ secrets.FOOTBALL_API_TOKEN }}
+          FOOTBALL_PREDICTOR_DEMO: ${{ inputs.demo == true && '1' || '' }}
+        run: |
+          DAY="${{ steps.day.outputs.day }}"
+          mkdir -p data/daily data/logs data/reports
+
+          if [ -z "$FOOTBALL_SCHEDULE_URL" ] && [ "$FOOTBALL_PREDICTOR_DEMO" != "1" ]; then
+            echo "::error::请配置 Secret FOOTBALL_SCHEDULE_URL，或手动运行时勾选 demo"
+            exit 1
+          fi
+
+          EXTRA=""
+          if [ "${{ inputs.recommend_only }}" = "true" ]; then
+            EXTRA="--recommend"
+          fi
+
+          set +e
+          python scripts/run_today.py --date "$DAY" --no-cache $EXTRA \
+            2>&1 | tee "data/logs/run_today_${DAY}.log"
+          CODE=${PIPESTATUS[0]}
+          set -e
+          exit $CODE
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jingcai-${{ steps.day.outputs.day }}
+          path: |
+            data/daily/**
+            data/logs/**
+            data/reports/**
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Summary
+        if: always()
+        run: |
+          DAY="${{ steps.day.outputs.day }}"
+          {
+            echo "## 竞彩日报 ${DAY}"
+            echo ""
+            echo "- 日志: \`data/logs/run_today_${DAY}.log\`"
+            echo "- 预测输出目录: \`data/daily/\`"
+            if [ -f "data/logs/run_today_${DAY}.log" ]; then
+              echo ""
+              echo '```'
+              tail -n 60 "data/logs/run_today_${DAY}.log"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
